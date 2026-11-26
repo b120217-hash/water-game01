@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>沉沒之城</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #02080f; color: #cfe9ee;
+    font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  canvas { width: 100%; max-width: 960px; aspect-ratio: 16 / 9; touch-action: none; display: block; }
+  p { margin: 8px 12px; font-size: 14px; color: #7fa7b0; text-align: center; }
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="450"></canvas>
+<p>目標：收集足夠的能源核心（各關數量不同），開啟地圖最右端的柵欄並游出去。按 M 或點右上角圖示可開關聲音。方向鍵 / WASD 移動，手機按住畫面游向手指。回到左上方潛水基地可補氧，小心紅光怪物</p>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 800, H = 450, WH = 1500, CS = 150;
+let WW, COLS, L, lv = 0, seed = 1;
+
+function R(a, b) { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return a + ((t ^ t >>> 14) >>> 0) / 4294967296 * (b - a); }
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const floorY = x => 1400 + Math.sin(x * .004) * 30 + Math.sin(x * .013) * 14;
+const zoneOf = x => x < WW / 3 ? 0 : x < WW * 2 / 3 ? 1 : 2;
+const NEON = ['#ff4fa3', '#4ff0ff', '#ffd24f'];
+
+// ---- 關卡設定 ----
+const LV = [
+  { title: '第一關：沉沒之城', seed: 7, ww: 9000, maxh: 860, tanks: 40, mons: 32, cores: 5, need: 3, drain: 1, dark: 1, mspd: 1, bite: 18,
+    names: ['廢棄港口', '沉沒市中心', '深淵禁區'],
+    zn: [['#1d4a58', '#2e7083', '#e0b650'], ['#182f4c', '#2a4f78', '#7fd6e8'], ['#2a1f45', '#45346f', '#b68cff']] },
+  { title: '第二關：深淵反應爐', seed: 21, ww: 11000, maxh: 920, tanks: 34, mons: 50, cores: 7, need: 5, drain: 1.25, dark: 1.2, mspd: 1.25, bite: 22,
+    names: ['淹沒住宅區', '廢棄實驗站', '核心反應爐'],
+    zn: [['#1f4a3c', '#2f7360', '#9be05a'], ['#3a2a2a', '#5e4444', '#ff9a5a'], ['#2b1030', '#521c58', '#ff5aa8']] },
+  { title: '第三關：黑暗海溝', seed: 33, ww: 13000, maxh: 980, tanks: 30, mons: 70, cores: 8, need: 6, drain: 1.45, dark: 1.4, mspd: 1.45, bite: 26,
+    names: ['冰冷淺灘', '幽暗峽谷', '深海魔窟'],
+    zn: [['#27415c', '#4a7aa3', '#bfe6ff'], ['#1a2a3a', '#2e4a5e', '#6fffd0'], ['#2a0f1a', '#5a1d33', '#ff6a5a']] }
+];
+
+// ---- 建造關卡 ----
+let B, S, far, signs, TK0, MON0, CORE0, valid, validN, gate;
+const inSolid = (x, y, m) => S.some(s => s.h > 0 && x > s.x - m && x < s.x + s.w + m && y > s.y - m && y < s.y + s.h + m);
+function build(n) {
+  L = LV[n]; seed = L.seed; WW = L.ww; COLS = Math.ceil(WW / CS);
+  B = []; S = []; far = []; signs = []; TK0 = []; MON0 = []; CORE0 = [];
+  for (let x = 420; x < WW - 380;) {
+    const z = zoneOf(x), w = R(80, 190), h = R(160, z == 0 ? 440 : L.maxh);
+    const fy = floorY(x + w / 2), cnt = Math.max(3, Math.floor(w / 22)), dip = [];
+    for (let i = 0; i < cnt; i++) dip.push(R(0, 55));
+    const b = { x, w, top: fy - h, bot: fy + 20, dip, n: cnt, z, md: Math.max(...dip), ant: R(0, 1) < .35 };
+    B.push(b); S.push({ x, y: b.top + b.md, w, h: h - b.md + 20 });
+    if (R(0, 1) < .5) signs.push({ x: x + R(8, w - 36), y: b.top + b.md + R(30, Math.max(40, h - b.md - 120)), c: NEON[Math.floor(R(0, 3))] });
+    x += w + R(95, 270);
+  }
+  for (let i = 0; i < B.length - 1; i++) {
+    const a = B[i], c = B[i + 1], gap = c.x - (a.x + a.w);
+    if (gap < 250 && R(0, 1) < .6) S.push({ x: a.x + a.w, y: Math.max(a.top + a.md, c.top + c.md) + R(30, 110), w: gap, h: 12, bridge: 1 });
+  }
+  for (let x = 0; x < WW; x += R(60, 160)) far.push({ x, w: R(50, 130), h: R(200, 650) });
+  const place = (x0, x1, y0, y1) => { for (let k = 0; k < 60; k++) { const x = R(x0, x1), y = R(y0, y1);
+    if (y < floorY(x) - 40 && !inSolid(x, y, 16)) return { x, y }; } return null; };
+  for (let i = 0; i < L.tanks; i++) { const sg = (WW - 1000) / L.tanks, t = place(450 + i * sg, 450 + (i + 1) * sg, 110, 1380); if (t) TK0.push({ ...t }); }
+  TK0.unshift({ x: 360, y: 190 });
+  for (let i = 0; i < L.cores; i++) { const sg = (WW - 1500) / L.cores, c = place(700 + i * sg, 700 + (i + 1) * sg, 150, 1350); if (c) CORE0.push({ ...c }); }
+  for (let i = 0; i < L.mons; i++) { const m = place(900 + (WW - 1500) * Math.sqrt(R(0, 1)), 900 + (WW - 1500) * Math.sqrt(R(0, 1)) + 1, 150, 1350); if (m) MON0.push({ hx: m.x, hy: m.y, ph: R(0, 6.28) }); }
+  gate = { x: WW - 160, w: 18, open: 0, isOpen: false, s: { x: WW - 160, y: 0, w: 18, h: WH } };
+  S.push(gate.s);
+  valid = new Uint8Array(COLS * 10); validN = 0;
+  for (let cy = 0; cy < 10; cy++) for (let cx = 0; cx < COLS; cx++) {
+    const x = (cx + .5) * CS, y = (cy + .5) * CS;
+    if (x < gate.x && y < floorY(x) - 20 && !inSolid(x, y, 0)) { valid[cy * COLS + cx] = 1; validN++; }
+  }
+}
+
+// ---- 音樂與音效（瀏覽器即時合成，不需任何音檔）----
+let AC = null, master, musicG, sfxG, nbuf, muted = false, MS = null, lowT = 0;
+const MUS = [
+  { bpm: 72, root: 110, prog: [0, -4, -2, -5], scale: [0, 3, 5, 7, 10], bass: 'sine', wave: 'sine', lead: .35, pulse: 0 },
+  { bpm: 88, root: 98, prog: [0, 0, -2, 1], scale: [0, 1, 5, 7, 8], bass: 'triangle', wave: 'triangle', lead: .3, pulse: 4 },
+  { bpm: 104, root: 73.4, prog: [0, 1, 0, -1], scale: [0, 2, 3, 6, 7], bass: 'sawtooth', wave: 'square', lead: .22, pulse: 2, lp: 260 }
+];
+function initAudio() {
+  if (AC) { if (AC.state == 'suspended') AC.resume(); return; }
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = muted ? 0 : .7; master.connect(AC.destination);
+  musicG = AC.createGain(); musicG.gain.value = .35; musicG.connect(master);
+  sfxG = AC.createGain(); sfxG.gain.value = .7; sfxG.connect(master);
+  nbuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate); const d = nbuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  startMusic(lv); setInterval(sched, 100);
+}
+function toggleMute() { muted = !muted; if (master) master.gain.setTargetAtTime(muted ? 0 : .7, AC.currentTime, .05); }
+function tone(f, t, dur, type, vol, dest, slide, lp) {
+  const o = AC.createOscillator(), g = AC.createGain(); o.type = type; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + Math.min(.05, dur / 4)); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  let n = o; if (lp) { const fl = AC.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = lp; o.connect(fl); n = fl; }
+  n.connect(g); g.connect(dest); o.start(t); o.stop(t + dur + .05);
+}
+function noise(t, dur, vol, lp) {
+  const src = AC.createBufferSource(), g = AC.createGain(), fl = AC.createBiquadFilter(); src.buffer = nbuf; fl.type = 'lowpass'; fl.frequency.value = lp;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur); src.connect(fl); fl.connect(g); g.connect(sfxG); src.start(t); src.stop(t + dur);
+}
+function startMusic(n) { if (!AC) return; MS = { n, step: 0, t: AC.currentTime + .15 }; musicG.gain.setTargetAtTime(.35, AC.currentTime, .2); }
+function sched() {
+  if (!AC || !MS) return;
+  const M = MUS[MS.n], sd = 60 / M.bpm / 2;
+  while (MS.t < AC.currentTime + .4) {
+    const i = MS.step++, t = MS.t, rf = M.root * Math.pow(2, M.prog[Math.floor(i / 16) % 4] / 12);
+    if (i % 16 == 0) { tone(rf, t, sd * 16, M.bass, .2, musicG, 0, M.lp); tone(rf * 1.5, t, sd * 16, 'sine', .07, musicG); }
+    if (i % 2 == 0 && Math.random() < M.lead) tone(rf * Math.pow(2, M.scale[Math.floor(Math.random() * 5)] / 12) * (Math.random() < .5 ? 2 : 4), t, sd * 3, M.wave, .06, musicG);
+    if (M.pulse && i % M.pulse == 0) tone(90, t, .2, 'sine', .25, musicG, 40);
+    MS.t += sd;
+  }
+}
+const arp = (fs, dt, type, vol, dur, delay = 0) => { const t = AC.currentTime + delay; fs.forEach((f, i) => tone(f, t + i * dt, dur, type, vol, sfxG)); };
+function sfxTank() { if (!AC) return; const t = AC.currentTime; tone(520, t, .12, 'triangle', .25, sfxG, 880); tone(880, t + .1, .15, 'triangle', .2, sfxG, 1320); }
+function sfxCore() { if (AC) arp([523, 659, 784, 1047], .08, 'sine', .3, .35); }
+function sfxBite() { if (!AC) return; const t = AC.currentTime; noise(t, .25, .5, 500); tone(160, t, .35, 'sawtooth', .3, sfxG, 50, 600); }
+function sfxGate() { if (!AC) return; const t = AC.currentTime; tone(50, t, 1.2, 'sawtooth', .35, sfxG, 160, 300); noise(t, 1.2, .3, 200); arp([392, 523, 659, 784, 1047], .12, 'triangle', .28, .5, .35); }
+function sfxLow() { if (AC) tone(880, AC.currentTime, .09, 'square', .12, sfxG); }
+function sfxBubble() { if (AC) tone(500 + Math.random() * 500, AC.currentTime, .06, 'sine', .08, sfxG, 1400); }
+function sfxClear() { if (AC) arp([392, 494, 587, 784, 988], .12, 'triangle', .3, .5); }
+function sfxOver() { if (!AC) return; const t = AC.currentTime; tone(330, t, 1.1, 'sawtooth', .3, sfxG, 60, 700); noise(t, .6, .25, 300); musicG.gain.setTargetAtTime(.05, t, .3); }
+function sfxWin() { if (AC) arp([392, 392, 523, 659, 784, 659, 784, 1047, 1319], .16, 'triangle', .32, .6); }
+
+// ---- 遊戲狀態 ----
+let p, tanks, cores, mons, bubbles, ex, exN, camX, camY, state, stT = 0, tLevel = 0, tTotal = 0, msg = '', msgT = 0;
+const setState = s => { state = s; stT = 0; if (s == 'over') sfxOver(); else if (s == 'clear') sfxClear(); else if (s == 'win') sfxWin(); };
+function startLevel(n) {
+  lv = n; build(n); if (n == 0) tTotal = 0; tLevel = 0;
+  p = { x: 140, y: 70, vx: 0, vy: 0, face: 1, oxy: 100, inv: 0, got: 0, ph: 0 };
+  tanks = TK0.map(t => ({ ...t, got: false })); cores = CORE0.map(c => ({ ...c, got: false })); bubbles = [];
+  mons = MON0.map(m => ({ ...m, x: m.hx, y: m.hy, t: 0, face: 1 }));
+  ex = new Uint8Array(COLS * 10); exN = 0; camX = 0; camY = 0;
+  msg = L.title; msgT = 3.5; lowT = 0; setState('play'); startMusic(n);
+}
+const pct = () => Math.floor(exN / validN * 100);
+const fmt = t => Math.floor(t / 60) + ' 分 ' + Math.floor(t % 60) + ' 秒';
+function advance() {
+  if (stT < .6) return;
+  if (state == 'over') startLevel(lv); else if (state == 'clear') startLevel(lv + 1); else if (state == 'win') startLevel(0);
+}
+
+// ---- 操作 ----
+const keys = {}; let touch = null;
+addEventListener('keydown', e => { initAudio(); if (e.key.toLowerCase() == 'm') toggleMute(); keys[e.key.toLowerCase()] = true; if (e.key == ' ' && state != 'play') advance(); });
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H }; }
+cv.addEventListener('pointerdown', e => { initAudio(); const q = pos(e); if (q.x > W - 56 && q.y < 46) { toggleMute(); return; }
+  if (state != 'play') { advance(); return; } touch = q; });
+cv.addEventListener('pointermove', e => { if (touch) touch = pos(e); });
+addEventListener('pointerup', () => touch = null);
+
+function collide() {
+  const r = 13;
+  for (const s of S) {
+    if (s.h <= 0 || p.x + r < s.x || p.x - r > s.x + s.w || p.y + r < s.y || p.y - r > s.y + s.h) continue;
+    const l = p.x + r - s.x, rt = s.x + s.w - (p.x - r), t = p.y + r - s.y, bt = s.y + s.h - (p.y - r), m = Math.min(l, rt, t, bt);
+    if (m == l) { p.x -= l; p.vx = Math.min(p.vx, 0); } else if (m == rt) { p.x += rt; p.vx = Math.max(p.vx, 0); }
+    else if (m == t) { p.y -= t; p.vy = Math.min(p.vy, 0); } else { p.y += bt; p.vy = Math.max(p.vy, 0); }
+  }
+}
+
+function update(dt) {
+  if (state !== 'play') return;
+  tLevel += dt; tTotal += dt; msgT -= dt;
+  let ax = 0, ay = 0;
+  if (keys['arrowleft'] || keys['a']) ax -= 1; if (keys['arrowright'] || keys['d']) ax += 1;
+  if (keys['arrowup'] || keys['w']) ay -= 1; if (keys['arrowdown'] || keys['s']) ay += 1;
+  if (touch) { const dx = touch.x - (p.x - camX), dy = touch.y - (p.y - camY), d = Math.hypot(dx, dy); if (d > 12) { ax = dx / d; ay = dy / d; } }
+  p.vx += ax * 900 * dt; p.vy += (ay * 900 + 30) * dt;
+  const k = Math.exp(-3 * dt); p.vx *= k; p.vy *= k;
+  p.x = clamp(p.x + p.vx * dt, 15, WW - 15); p.y = clamp(p.y + p.vy * dt, 15, floorY(p.x) - 16);
+  collide(); p.y = clamp(p.y, 15, floorY(p.x) - 16);
+  if (Math.abs(ax) > .1) p.face = Math.sign(ax);
+  p.ph += (2.5 + Math.hypot(p.vx, p.vy) / 25) * dt;
+
+  if (p.x < 260 && p.y < 60) p.oxy = Math.min(100, p.oxy + 45 * dt);
+  else p.oxy -= (1.2 + Math.hypot(p.vx, p.vy) / 400) * L.drain * dt;
+  for (const t of tanks) if (!t.got && Math.hypot(t.x - p.x, t.y - p.y) < 34) { t.got = true; p.oxy = Math.min(100, p.oxy + 45); sfxTank(); }
+  for (const c of cores) if (!c.got && Math.hypot(c.x - p.x, c.y - p.y) < 36) {
+    c.got = true; p.got++; sfxCore(); msg = p.got <= L.need ? '取得能源核心 ' + p.got + ' / ' + L.need : '額外的能源核心 +1'; msgT = 2.5;
+    if (p.got == L.need) { gate.isOpen = true; gate.s.h = 0; sfxGate(); msg = '柵欄已開啟！前往地圖最右端的出口'; msgT = 5; }
+  }
+  if (gate.isOpen) gate.open = Math.min(1, gate.open + dt * .8);
+  if (gate.isOpen && p.x > gate.x + 60) { setState(lv + 1 < LV.length ? 'clear' : 'win'); return; }
+
+  p.inv -= dt; lowT -= dt; if (p.oxy < 25 && lowT <= 0) { sfxLow(); lowT = 1; }
+  for (const m of mons) {
+    m.t += dt;
+    const dx = p.x - m.x, dy = p.y - m.y, d = Math.hypot(dx, dy), z = zoneOf(m.x);
+    let tx, ty, sp;
+    if (d < 230) { tx = p.x; ty = p.y; sp = (80 + z * 30) * L.mspd; }
+    else { tx = m.hx + Math.sin(m.t * .4 + m.ph) * 220; ty = m.hy + Math.cos(m.t * .3 + m.ph) * 90; sp = 55 * L.mspd; }
+    const ddx = tx - m.x, ddy = ty - m.y, dd = Math.hypot(ddx, ddy) || 1;
+    const nx = m.x + ddx / dd * sp * dt, ny = m.y + ddy / dd * sp * dt;
+    if (!inSolid(nx, m.y, 16)) m.x = nx;
+    if (!inSolid(m.x, ny, 16) && ny < floorY(m.x) - 20 && ny > 15) m.y = ny;
+    if (Math.abs(ddx) > 4) m.face = Math.sign(ddx);
+    if (d < 34 && p.inv <= 0) { p.oxy -= L.bite; p.inv = 1.5; sfxBite(); p.vx += Math.sign(-dx || 1) * 500; p.vy += Math.sign(-dy || 1) * 250; }
+  }
+  if (p.oxy <= 0) { p.oxy = 0; setState('over'); }
+
+  for (let cy = Math.max(0, Math.floor((p.y - 260) / CS)); cy <= Math.min(9, Math.floor((p.y + 260) / CS)); cy++)
+    for (let cx = Math.max(0, Math.floor((p.x - 260) / CS)); cx <= Math.min(COLS - 1, Math.floor((p.x + 260) / CS)); cx++) {
+      const i = cy * COLS + cx;
+      if (valid[i] && !ex[i] && Math.hypot((cx + .5) * CS - p.x, (cy + .5) * CS - p.y) < 260) { ex[i] = 1; exN++; }
+    }
+  if (Math.random() < .012) sfxBubble();
+  if (Math.random() < .15) bubbles.push({ x: p.x + p.face * 26, y: p.y - 4, r: 1.5 + Math.random() * 2, l: 1.5 });
+  for (const b of bubbles) { b.y -= 40 * dt; b.l -= dt; }
+  bubbles = bubbles.filter(b => b.l > 0);
+  camX = clamp(p.x - W / 2, 0, WW - W); camY = clamp(p.y - H / 2, 0, WH - H);
+}
+
+// ---- 繪圖 ----
+function drawDiver() {
+  const ph = p.ph, tilt = clamp(p.vy / 260, -.6, .6);
+  ctx.translate(p.x, p.y); ctx.scale(p.face, 1); ctx.rotate(tilt); ctx.lineCap = 'round';
+  const leg = (a, col, fin) => {
+    ctx.save(); ctx.translate(-14, 3); ctx.rotate(a);
+    ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-20, 0); ctx.stroke();
+    ctx.fillStyle = fin; ctx.beginPath(); ctx.moveTo(-19, -2); ctx.lineTo(-36, -9); ctx.lineTo(-38, 0); ctx.lineTo(-36, 9); ctx.lineTo(-19, 2); ctx.fill();
+    ctx.restore();
+  };
+  leg(Math.sin(ph + Math.PI) * .5 - .05, '#0b121c', '#8f420c');
+  ctx.fillStyle = '#aab6bf'; ctx.fillRect(-12, -19, 24, 9); ctx.fillStyle = '#dfe7ec'; ctx.fillRect(-10, -17, 20, 2);
+  ctx.fillStyle = '#e0b650'; ctx.fillRect(12, -17, 4, 4);
+  ctx.fillStyle = '#1d2c40'; ctx.beginPath(); ctx.ellipse(0, 0, 17, 9, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f08a24'; ctx.fillRect(-9, -1, 19, 2.5);
+  leg(Math.sin(ph) * .5 - .05, '#16202e', '#f08a24');
+  ctx.save(); ctx.translate(10, 4); ctx.rotate(Math.sin(ph + 1.5) * .3 + .1);
+  ctx.strokeStyle = '#16202e'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(16, 3); ctx.stroke();
+  ctx.fillStyle = '#e8b890'; ctx.beginPath(); ctx.arc(17, 3, 3, 0, 7); ctx.fill();
+  ctx.fillStyle = '#e0b650'; ctx.fillRect(16, 1, 8, 5); ctx.fillStyle = '#fff6c0'; ctx.fillRect(24, 1.5, 2, 4); ctx.restore();
+  ctx.fillStyle = '#0f1826'; ctx.beginPath(); ctx.arc(20, -2, 8, 0, 7); ctx.fill();
+  ctx.fillStyle = '#9fe3f2'; ctx.fillRect(22, -6, 7, 6); ctx.strokeStyle = '#e0b650'; ctx.lineWidth = 1.5; ctx.strokeRect(21.5, -6.5, 8, 7);
+  ctx.fillStyle = '#fff'; ctx.fillRect(23, -5, 2, 3);
+  ctx.strokeStyle = '#2a3a4a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(15, -15); ctx.quadraticCurveTo(27, -17, 27, -3); ctx.stroke();
+}
+function water(y) { const t = clamp(y / 1300, 0, 1); return `rgb(${lerp(27, 2, t) | 0},${lerp(123, 10, t) | 0},${lerp(148, 18, t) | 0})`; }
+function glow(x, y, r, c) { const g = ctx.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, c); g.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); }
+function banner(t1, t2, t3) {
+  ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(0, 0, W, H); ctx.fillStyle = '#e6f6fa'; ctx.textAlign = 'center';
+  ctx.font = '32px sans-serif'; ctx.fillText(t1, W / 2, H / 2 - 22); ctx.font = '16px sans-serif';
+  ctx.fillText(t2, W / 2, H / 2 + 12); ctx.fillStyle = '#7fd6e8'; ctx.fillText(t3, W / 2, H / 2 + 44); ctx.textAlign = 'left';
+}
+
+function draw() {
+  const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, water(camY)); bg.addColorStop(1, water(camY + H));
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(70,140,170,.22)';
+  for (const f of far) { const fx = f.x - camX * .4, by = 1230 - camY * .8; if (fx + f.w < 0 || fx > W) continue; ctx.fillRect(fx, by - f.h, f.w, f.h + 400); }
+
+  ctx.save(); ctx.translate(-camX, -camY);
+  ctx.fillStyle = 'rgba(210,245,255,.55)'; ctx.fillRect(camX, 0, W, 5);
+  if (camX < 400) { ctx.fillStyle = '#5a4a3a'; ctx.beginPath(); ctx.moveTo(60, -4); ctx.lineTo(240, -4); ctx.lineTo(205, 30); ctx.lineTo(95, 30); ctx.fill();
+    ctx.fillStyle = '#e0b650'; ctx.font = '13px sans-serif'; ctx.fillText('潛水基地：在這裡補氧', 70, 52); }
+
+  for (const b of B) {
+    if (b.x + b.w < camX || b.x > camX + W || b.bot < camY || b.top > camY + H) continue;
+    const Z = L.zn[b.z], cw = b.w / b.n;
+    ctx.fillStyle = Z[0]; ctx.beginPath(); ctx.moveTo(b.x, b.bot);
+    for (let i = 0; i < b.n; i++) { ctx.lineTo(b.x + i * cw, b.top + b.dip[i]); ctx.lineTo(b.x + (i + 1) * cw, b.top + b.dip[i]); }
+    ctx.lineTo(b.x + b.w, b.bot); ctx.fill();
+    ctx.fillStyle = Z[1]; ctx.fillRect(b.x, b.top + b.md, 5, b.bot - b.top - b.md); ctx.fillRect(b.x + b.w - 5, b.top + b.md, 5, b.bot - b.top - b.md);
+    for (let wy = b.top + b.md + 16, j = 0; wy < b.bot - 50; wy += 36, j++)
+      for (let wx = b.x + 14, i = 0; wx < b.x + b.w - 26; wx += 30, i++) {
+        ctx.fillStyle = (Math.floor(b.x) + i * 31 + j * 17) % 7 < 2 ? Z[2] : '#06121c'; ctx.fillRect(wx, wy, 14, 20);
+      }
+    if (b.ant) { const ty = b.top + b.dip[Math.floor(b.n / 2)]; ctx.strokeStyle = Z[1]; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(b.x + b.w / 2, ty); ctx.lineTo(b.x + b.w / 2, ty - 50); ctx.stroke(); }
+  }
+  for (const s of S) if (s.bridge && s.x + s.w > camX && s.x < camX + W) {
+    ctx.fillStyle = '#3a6f88'; ctx.fillRect(s.x, s.y, s.w, s.h); ctx.fillStyle = '#1b3f55'; ctx.fillRect(s.x, s.y + 8, s.w, 4);
+    ctx.fillStyle = '#2e5c75'; for (let rx = s.x + 6; rx < s.x + s.w; rx += 18) ctx.fillRect(rx, s.y - 12, 3, 12);
+  }
+  for (const g of signs) if (g.x > camX - 40 && g.x < camX + W) { ctx.fillStyle = g.c; ctx.fillRect(g.x, g.y, 28, 11); }
+  // 活動柵欄與出口
+  if (gate.x + 60 > camX && gate.x - 60 < camX + W) {
+    ctx.fillStyle = gate.isOpen ? '#3fcf8a' : '#d24a4a';
+    ctx.fillRect(gate.x, 0, 4, WH); ctx.fillRect(gate.x + gate.w - 4, 0, 4, WH);
+    for (let yy = 0; yy < WH; yy += 22) ctx.fillRect(gate.x, yy * (1 - gate.open * .97), gate.w, 6);
+    ctx.fillStyle = '#e6f6fa'; ctx.font = '14px sans-serif'; ctx.fillText('出口', gate.x + 70, p.y - 30);
+  }
+  ctx.fillStyle = '#0a2230'; ctx.beginPath(); ctx.moveTo(camX, WH + 50);
+  for (let x = camX; x <= camX + W + 40; x += 40) ctx.lineTo(x, floorY(x)); ctx.lineTo(camX + W + 40, WH + 50); ctx.fill();
+  for (const t of tanks) if (!t.got) { ctx.fillStyle = '#f0cf4a'; ctx.fillRect(t.x - 7, t.y - 12, 14, 24); ctx.fillStyle = '#7a5f10'; ctx.fillRect(t.x - 4, t.y - 16, 8, 5); }
+  for (const c of cores) if (!c.got) { ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(performance.now() / 700);
+    ctx.fillStyle = '#5ff0ff'; ctx.fillRect(-9, -9, 18, 18); ctx.fillStyle = '#fff'; ctx.fillRect(-4, -4, 8, 8); ctx.restore(); }
+  ctx.fillStyle = 'rgba(190,235,245,.5)'; for (const b of bubbles) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill(); }
+  for (const m of mons) {
+    if (m.x < camX - 60 || m.x > camX + W + 60 || m.y < camY - 60 || m.y > camY + H + 60) continue;
+    ctx.save(); ctx.translate(m.x, m.y); ctx.scale(m.face, 1);
+    ctx.fillStyle = '#4a1a3c'; ctx.beginPath(); ctx.ellipse(0, 0, 24, 14, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-22, 0); ctx.lineTo(-37, -11); ctx.lineTo(-37, 11); ctx.fill();
+    ctx.strokeStyle = '#4a1a3c'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(8, -12); ctx.quadraticCurveTo(18, -30, 28, -18); ctx.stroke();
+    ctx.fillStyle = '#ff5a5a'; ctx.beginPath(); ctx.arc(28, -18, 3.5, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffe9a0'; ctx.beginPath(); ctx.arc(13, -3, 3.5, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; for (let i = 0; i < 3; i++) ctx.fillRect(14 + i * 4, 4, 2, 5);
+    ctx.restore();
+  }
+  ctx.save(); if (p.inv > 0) ctx.globalAlpha = .45 + .4 * Math.sin(p.inv * 30);
+  drawDiver();
+  ctx.restore(); ctx.restore();
+
+  const rad = (170 + p.oxy * 1.5) / L.dark, sx = p.x - camX, sy = p.y - camY, a = Math.min(.97, .5 + .38 * clamp(p.y / 1300, 0, 1) + (L.dark - 1) * .25);
+  const d = ctx.createRadialGradient(sx, sy, 25, sx, sy, rad);
+  d.addColorStop(0, 'rgba(0,4,10,0)'); d.addColorStop(1, `rgba(0,4,10,${a})`); ctx.fillStyle = d; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const t of tanks) if (!t.got) glow(t.x - camX, t.y - camY, 55, 'rgba(255,205,70,.5)');
+  for (const c of cores) if (!c.got) glow(c.x - camX, c.y - camY, 80, 'rgba(80,240,255,.6)');
+  for (const g of signs) glow(g.x + 14 - camX, g.y + 5 - camY, 45, g.c + '55');
+  for (const m of mons) glow(m.x + 28 * m.face - camX, m.y - 18 - camY, 42, 'rgba(255,70,70,.5)');
+  const gx = gate.x - camX;
+  if (gx > -60 && gx < W + 60) { const gg = ctx.createLinearGradient(gx - 40, 0, gx + 60, 0), gc = gate.isOpen ? '60,230,140' : '230,70,70';
+    gg.addColorStop(0, `rgba(${gc},0)`); gg.addColorStop(.4, `rgba(${gc},.3)`); gg.addColorStop(1, `rgba(${gc},0)`); ctx.fillStyle = gg; ctx.fillRect(gx - 40, 0, 100, H); }
+  ctx.globalCompositeOperation = 'source-over';
+  if (p.oxy < 25 && state == 'play') { ctx.fillStyle = `rgba(200,30,40,${.1 + .07 * Math.sin(performance.now() / 150)})`; ctx.fillRect(0, 0, W, H); }
+
+  if (state == 'play') {
+    let tg = null, nd = 1e9;
+    if (gate.isOpen) { tg = { x: gate.x + 80, y: p.y }; nd = tg.x - p.x; }
+    else for (const c of cores) if (!c.got) { const dd = Math.hypot(c.x - p.x, c.y - p.y); if (dd < nd) { nd = dd; tg = c; } }
+    if (tg && nd > 120) {
+      const ang = Math.atan2(tg.y - p.y, tg.x - p.x), ax0 = sx + Math.cos(ang) * 75, ay0 = sy + Math.sin(ang) * 75, col = gate.isOpen ? 'rgba(80,240,150,.9)' : 'rgba(95,240,255,.9)';
+      ctx.save(); ctx.translate(ax0, ay0); ctx.rotate(ang); ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-6, -7); ctx.lineTo(-6, 7); ctx.fill(); ctx.restore();
+      ctx.fillStyle = col; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(Math.floor(nd / 10) + ' 公尺', ax0, ay0 + 22); ctx.textAlign = 'left';
+    }
+  }
+  // HUD
+  ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(14, 14, 204, 18);
+  ctx.fillStyle = p.oxy < 25 ? '#e5484d' : '#5fd4e8'; ctx.fillRect(16, 16, 2 * p.oxy, 14);
+  ctx.fillStyle = '#e6f6fa'; ctx.font = '14px sans-serif'; ctx.fillText('氧氣', 226, 29);
+  ctx.fillText(L.names[zoneOf(p.x)] + '　水深 ' + Math.floor(p.y / 10) + ' 公尺　探索度 ' + pct() + '%', 14, 52);
+  ctx.fillStyle = '#5ff0ff'; ctx.fillText('能源核心 ' + Math.min(p.got, L.need) + ' / ' + L.need + '（地圖上共 ' + cores.length + ' 個）', 14, 72);
+  if (msgT > 0) { ctx.textAlign = 'center'; ctx.font = '20px sans-serif'; ctx.fillStyle = '#fff'; ctx.fillText(msg, W / 2, 110); ctx.textAlign = 'left'; }
+  else if (!gate.isOpen && p.x > gate.x - 350) { ctx.textAlign = 'center'; ctx.font = '16px sans-serif'; ctx.fillStyle = '#ff8a8a'; ctx.fillText('柵欄上鎖了：需要 ' + L.need + ' 個能源核心', W / 2, 110); ctx.textAlign = 'left'; }
+  // 小地圖
+  const mx = W - 294, my = H - 64, mw = 280, mh = 50, sX = mw / WW, sY = mh / WH;
+  ctx.fillStyle = 'rgba(0,10,20,.65)'; ctx.fillRect(mx - 2, my - 2, mw + 4, mh + 4);
+  ctx.fillStyle = 'rgba(95,212,232,.3)';
+  for (let i = 0; i < ex.length; i++) if (ex[i]) ctx.fillRect(mx + (i % COLS) * CS * sX, my + Math.floor(i / COLS) * CS * sY, CS * sX + .6, CS * sY + .6);
+  ctx.fillStyle = '#9ab';
+  for (const b of B) if (ex[Math.floor((b.top + b.md + 10) / CS) * COLS + Math.floor((b.x + b.w / 2) / CS)]) ctx.fillRect(mx + b.x * sX, my + (b.top + b.md) * sY, Math.max(2, b.w * sX), (b.bot - b.top - b.md) * sY);
+  ctx.fillStyle = gate.isOpen ? '#3fcf8a' : '#d24a4a'; ctx.fillRect(mx + gate.x * sX, my, 2, mh);
+  const pu = 4 + 1.5 * Math.sin(performance.now() / 250); ctx.fillStyle = '#5ff0ff';
+  for (const c of cores) if (!c.got) { ctx.fillRect(mx + c.x * sX - pu / 2, my + c.y * sY - pu / 2, pu, pu); }
+  ctx.fillStyle = '#fff'; ctx.fillRect(mx + p.x * sX - 2, my + p.y * sY - 2, 4, 4);
+
+  ctx.font = '22px sans-serif'; ctx.fillStyle = '#e6f6fa'; ctx.fillText(muted ? '🔇' : '🔊', W - 40, 34);
+  if (state == 'over') banner('氧氣耗盡', '收集核心 ' + Math.min(p.got, L.need) + ' / ' + L.need + '，探索度 ' + pct() + '%', '點擊畫面或按空白鍵重新挑戰本關');
+  if (state == 'clear') banner('第 ' + (lv + 1) + ' 關完成！', '本關用時 ' + fmt(tLevel), '點擊畫面或按空白鍵進入第 ' + (lv + 2) + ' 關');
+  if (state == 'win') banner('恭喜通關！', '你逃出了沉沒之城，總用時 ' + fmt(tTotal), '截圖給親友挑戰你的時間！點擊可重新開始');
+}
+
+let last = performance.now();
+function loop(t) { const dt = Math.min(.05, (t - last) / 1000); last = t; stT += dt; update(dt); draw(); requestAnimationFrame(loop); }
+startLevel(0); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
